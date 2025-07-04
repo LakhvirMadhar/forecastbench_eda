@@ -5,19 +5,25 @@ from ForecastBench and saving the files locally.
 
 import os
 import re
+import time
 import requests
 import base64
 from io import StringIO
 import asyncio
 import pandas as pd
 
-from utils.utils import read_json, write_json, read_csv_files
+from utils.utils import (
+    read_json, 
+    write_json, 
+    read_csv_files
+)
 
 
 BASE_FILEPATH = 'data/'
 CSV_FILEPATH = 'data/csv/'
 CHARTS_FILEPATH = 'output/'
 COMMIT_FILEPATH = 'data/commits.json'
+MASTER_CSV_FILEPATH = 'data/master.csv'
 
 FILEPATHS = [CSV_FILEPATH, CHARTS_FILEPATH]
 
@@ -41,6 +47,7 @@ def run_commit_retrieval(commits_url, params, headers):
     Args:
         commits_url (str): GitHub API endpoint URL for repository commits
         params (dict): Query parameters for the API request (e.g., since, until, author)
+        headers (dict): HTTP headers for GitHub API authentication
     """
     retrieved_commits = retrieve_all_commits(commits_url, params, headers)
     
@@ -52,11 +59,12 @@ def retrieve_all_commits(commits_url, params, headers):
     Retrieves the complete commit history from a GitHub repository using pagination.
     
     Fetches all commits across multiple pages and returns them in chronological order
-    (oldest to newest). Uses GitHub API authentication via environment variable.
+    (oldest to newest). Uses GitHub API authentication via provided headers.
 
     Args:
         commits_url (str): GitHub API endpoint URL for repository commits
         params (dict): Query parameters for the API request (e.g., since, until, author)
+        headers (dict): HTTP headers for GitHub API authentication
 
     Returns:
         list[dict]: Complete commit history ordered from oldest to newest, where each
@@ -142,7 +150,7 @@ def update_commit_history(retrieved_commits):
     CSV RETRIEVAL FUNCS
 -------------------------"""
 
-def download_csv_files():
+def download_csv_files(headers):
     """
     Download and process historical leaderboard CSV files from GitHub commits.
     
@@ -150,6 +158,9 @@ def download_csv_files():
     missing files, downloads them from GitHub API, processes the model data
     by cleaning and splitting model names, and saves cleaned CSV files with
     additional metadata (hash_id, date, cleaned model names, and methods).
+
+    Args:
+        headers (dict): HTTP headers for GitHub API authentication
 
     TODO: Implement async processing for better performance
     """
@@ -162,8 +173,7 @@ def download_csv_files():
     # Logic to check what downloaded csv files we currently have
     csv_files = read_csv_files(CSV_FILEPATH)
 
-    # Strip the csv files
-    # Compare hashes between commit history and csv files
+    # Compare hashes between commit history and stripped csv files
     csv_hashes = [file.split('.csv')[0] for file in csv_files]
     saved_hashes = {saved_commit['sha'] for saved_commit in saved_commit_history}
 
@@ -176,29 +186,42 @@ def download_csv_files():
         print("Files are all upto date!")
         return
 
+    processed_file = 0
     # TODO: Turn this into an async process
-    # TODO: Do entire dataset, not just size 1
-    # TODO: Add error handling to the requests, raiseError if we do get an error as we don't want to keep pinging if we failed to save something
-    for request_hash in hashes_to_request[:2]:
+    for request_hash in hashes_to_request:
+        try:
+            file_params = {'ref': request_hash}
+            file_response = requests.get(file_url, params=file_params, headers=headers)
+            file_data = file_response.json()
 
-        file_params = {'ref': request_hash}
-        file_response = requests.get(file_url, params=file_params)
-        file_data = file_response.json()
+            content = base64.b64decode(file_data['content']).decode('utf-8')
+            
+            # Process and save the cleaned CSV
+            save_cleaned_csv(content, request_hash, commit_date_lookup)
 
-        content = base64.b64decode(file_data['content']).decode('utf-8')
+            # Add delay between requests to avoid rate limiting
+            time.sleep(0.5)
+            processed_file +=1
+            print(f"Processed file ({processed_file}/{len(hashes_to_request)})")
         
-        # Process and save the cleaned CSV
-        save_cleaned_csv(content, request_hash, commit_date_lookup)
+        except Exception as e:
+            raise Exception(f"Unexpected error for hash {request_hash}: {e}")
 
 
 def save_cleaned_csv(content, request_hash, commit_date_lookup):
     """
     Process the CSV content and save it as a cleaned CSV file.
     
+    Reads the CSV content, extracts date information from commit data, processes
+    model names by splitting them into cleaned model names and methods, cleans
+    column names with N= patterns to separate scores from dataset sizes, and
+    saves the processed data as a new CSV file.
+    
     Args:
-        content (str): The decoded CSV content
-        request_hash (str): The commit hash
+        content (str): The decoded CSV content from GitHub API
+        request_hash (str): The commit hash used as filename identifier
         commit_date_lookup (dict): Dictionary mapping commit hashes to commit objects
+                                  containing date and other metadata
     """
     df = pd.read_csv(StringIO(content))
     
@@ -208,8 +231,19 @@ def save_cleaned_csv(content, request_hash, commit_date_lookup):
 
     all_processed_data = []
     
-    # Process each row in the Model column
+    # Identify columns that need cleaning (contain "N=" pattern)
+    columns_to_clean = []
+    cleaned_columns = {'Model'}  # Keep track of columns we've processed
+    
+    for col in df.columns:
+        if 'N=' in col:
+            columns_to_clean.append(col)
+            cleaned_columns.add(col)
+    
+    # Process each row
     for index, row in df.iterrows():
+        
+        # Clean the model column
         model = row['Model']
         
         # Split the model names
@@ -230,17 +264,30 @@ def save_cleaned_csv(content, request_hash, commit_date_lookup):
             cleaned_model_name = 'ForecastBench'
             method = raw_model[0]
 
-        # Create row data
+        # Create row data with cleaned model info
         processed_row = {
             'hash_id': request_hash,
             'llm_model': cleaned_model_name.strip(),
             'method': method.strip(),
             'date': date.strip()
         }
+        
+        # Clean columns with N= pattern
+        for col in columns_to_clean:
+            # Extract the base name and dataset size
+            # Example: "Dataset Score (N=5,479)" -> "Dataset Score" and "5,479"
+            base_name = col.split(' (N=')[0]
+            dataset_size_match = re.search(r'N=([0-9,]+)', col)
+            dataset_size = dataset_size_match.group(1) if dataset_size_match else 'Unknown'
+            
+            # Add the score value and dataset size as separate columns
+            processed_row[base_name] = row[col]
+            processed_row[f'{base_name} Dataset Size'] = dataset_size
 
-        # Populate the rest of the table
+        # Add remaining columns that weren't cleaned
         for col in df.columns:
-            processed_row[col] = row[col]
+            if col not in cleaned_columns:
+                processed_row[col] = row[col]
 
         all_processed_data.append(processed_row)
     
@@ -249,8 +296,17 @@ def save_cleaned_csv(content, request_hash, commit_date_lookup):
     final_df.to_csv(f'{CSV_FILEPATH}{request_hash}.csv', index=False)
 
 
-def create_or_update_master_csv():
+def create_master_csv():
     """
-    Create and update the master csv file containing the data across all days
+    Create and update the master CSV file by combining data from all individual CSV files.
+    
+    Reads all CSV files from the CSV directory, concatenates them into a single
+    DataFrame, and saves the combined data as a master CSV file for unified analysis.
     """
-    pass
+    csv_files = read_csv_files(CSV_FILEPATH)
+
+    combined_df = pd.concat([pd.read_csv(file) for file in csv_files], ignore_index=True)
+
+    combined_df.to_csv(MASTER_CSV_FILEPATH, index=False)
+
+    print(f"Created {MASTER_CSV_FILEPATH}")
