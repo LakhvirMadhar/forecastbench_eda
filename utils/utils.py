@@ -1,3 +1,4 @@
+import os
 import json
 import requests
 import asyncio
@@ -19,7 +20,16 @@ def write_json(filepath, file_to_write):
         json.dump(file_to_write, f, indent=4)
     
 
-async def fetch_request(*args):
+def read_csv_files(CSV_FILEPATH):
     """
-    Make http request
+    Returns a list of csv files
     """
+    files = []
+
+    for entry in os.listdir(CSV_FILEPATH):
+        full_path = os.path.join(CSV_FILEPATH, entry)
+
+        if os.path.isfile(full_path):
+            files.append(full_path)
+    
+    return files
