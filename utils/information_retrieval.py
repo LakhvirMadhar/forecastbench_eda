@@ -7,6 +7,7 @@ import os
 import re
 import time
 import requests
+import aiohttp
 import base64
 from io import StringIO
 import asyncio
@@ -150,7 +151,7 @@ def update_commit_history(retrieved_commits):
     CSV RETRIEVAL FUNCS
 -------------------------"""
 
-def download_csv_files(headers):
+async def download_csv_files(headers):
     """
     Download and process historical leaderboard CSV files from GitHub commits.
     
@@ -186,24 +187,54 @@ def download_csv_files(headers):
         print("Files are all upto date!")
         return
 
-    processed_file = 0
-    # TODO: Turn this into an async process
+    # Create semaphore to limit concurrent requests to 20
+    semaphore = asyncio.Semaphore(20)
+
+    tasks = []
+
     for request_hash in hashes_to_request:
+        task = download_single_file(semaphore, file_url, request_hash, headers, commit_date_lookup)
+        tasks.append(task)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    processed_files = 0
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"Error processing hash {hashes_to_request[i]}: {result}")
+        else:
+            processed_files +=1
+            print(f"Processed file ({processed_files}/{len(hashes_to_request)})")
+
+
+async def download_single_file(semaphore, file_url, request_hash, headers, commit_date_lookup):
+    """
+    Download and process a single CSV file with semaphore control.
+    
+    Args:
+        semaphore: Asyncio semaphore to limit concurrent requests
+        file_url: GitHub API URL for the file
+        request_hash: Git commit hash to download
+        headers: HTTP headers for authentication
+        commit_date_lookup: Dictionary mapping hashes to commit info
+    """
+
+    async with semaphore:
         try:
             file_params = {'ref': request_hash}
-            file_response = requests.get(file_url, params=file_params, headers=headers)
-            file_data = file_response.json()
 
-            content = base64.b64decode(file_data['content']).decode('utf-8')
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_url, params=file_params, headers=headers) as response:
+                    file_data = await response.json()
             
+            content = base64.b64decode(file_data['content']).decode('utf-8')
+
             # Process and save the cleaned CSV
             save_cleaned_csv(content, request_hash, commit_date_lookup)
 
-            # Add delay between requests to avoid rate limiting
-            time.sleep(0.5)
-            processed_file +=1
-            print(f"Processed file ({processed_file}/{len(hashes_to_request)})")
-        
+            await asyncio.sleep(0.5)
+
         except Exception as e:
             raise Exception(f"Unexpected error for hash {request_hash}: {e}")
 

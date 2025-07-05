@@ -1,7 +1,6 @@
 import os
 import json
-import requests
-import asyncio
+
 
 def read_json(filepath):
     """
