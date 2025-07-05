@@ -162,8 +162,6 @@ async def download_csv_files(headers):
 
     Args:
         headers (dict): HTTP headers for GitHub API authentication
-
-    TODO: Implement async processing for better performance
     """
 
     saved_commit_history = read_json(COMMIT_FILEPATH)
@@ -175,7 +173,7 @@ async def download_csv_files(headers):
     csv_files = read_csv_files(CSV_FILEPATH)
 
     # Compare hashes between commit history and stripped csv files
-    csv_hashes = [file.split('.csv')[0] for file in csv_files]
+    csv_hashes = [os.path.basename(file).split('.csv')[0] for file in csv_files]
     saved_hashes = {saved_commit['sha'] for saved_commit in saved_commit_history}
 
     # Store hashes for csv files we don't have yet
